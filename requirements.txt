@@ -1,3 +1,4 @@
+PySocks
 requests
-requesocks
+requests[socks]
 beautifulsoup4
